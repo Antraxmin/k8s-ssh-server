@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 
 	"k8s-ssh-server/k8s"
 
@@ -28,6 +29,7 @@ func generateHostKey() (cryptoSSH.Signer, error) {
 
 func main() {
 	k8s.InitK8sClient("/Users/antraxmin/.kube/config")
+
 	config := &cryptoSSH.ServerConfig{
 		PasswordCallback: func(c cryptoSSH.ConnMetadata, pass []byte) (*cryptoSSH.Permissions, error) {
 			if c.User() == "admin" && string(pass) == "password" {
@@ -58,7 +60,8 @@ func main() {
 			log.Printf("Failed to accept connection: %v", err)
 			continue
 		}
-		go func() {
+
+		go func(conn net.Conn) {
 			defer conn.Close()
 			sshConn, chans, reqs, err := cryptoSSH.NewServerConn(conn, config)
 			if err != nil {
@@ -66,7 +69,15 @@ func main() {
 				return
 			}
 
-			log.Printf("New SSH connection from %s (%s)", sshConn.RemoteAddr(), sshConn.ClientVersion())
+			username := sshConn.User()
+			log.Printf("New SSH connection from %s - user: %s", sshConn.RemoteAddr(), username)
+
+			podName, err := k8s.CreateUserPod(strings.ToLower(username))
+			if err != nil {
+				log.Printf("Failed to create pod for user %s: %v", username, err)
+				return
+			}
+			log.Printf("Pod %s created for user %s", podName, username)
 
 			go cryptoSSH.DiscardRequests(reqs)
 			for newChannel := range chans {
@@ -74,15 +85,16 @@ func main() {
 					newChannel.Reject(cryptoSSH.UnknownChannelType, "unsupported channel type")
 					continue
 				}
-
 				channel, _, err := newChannel.Accept()
 				if err != nil {
 					log.Printf("Failed to accept channel: %v", err)
 					continue
 				}
-				channel.Write([]byte("Welcome to the SSH server!\n"))
+
+				channel.Write([]byte(fmt.Sprintf("Welcome to the SSH server, %s!\n", username)))
+				channel.Write([]byte(fmt.Sprintf("Your Kubernetes pod '%s' is ready.\n", podName)))
 				channel.Close()
 			}
-		}()
+		}(conn)
 	}
 }

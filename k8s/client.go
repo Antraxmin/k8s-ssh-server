@@ -20,3 +20,10 @@ func InitK8sClient(kubeconfigPath string) {
 	}
 	log.Println("Kubernetes client initialized")
 }
+
+func GetClientset() *kubernetes.Clientset {
+	if Clientset == nil {
+		log.Fatalf("Kubernetes clientset is not initialized. Call InitK8sClient first.")
+	}
+	return Clientset
+}
