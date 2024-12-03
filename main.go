@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 
+	"k8s-ssh-server/db"
 	"k8s-ssh-server/k8s"
 
 	cryptoSSH "golang.org/x/crypto/ssh"
@@ -28,14 +30,26 @@ func generateHostKey() (cryptoSSH.Signer, error) {
 }
 
 func main() {
-	k8s.InitK8sClient("/Users/antraxmin/.kube/config")
+	db.InitDB()
+	defer db.DB.Close()
+
+	kubeConfigPath := os.Getenv("KUBECONFIG_PATH")
+	if kubeConfigPath == "" {
+		kubeConfigPath = "/root/.kube/config"
+	}
+	k8s.InitK8sClient(kubeConfigPath)
 
 	config := &cryptoSSH.ServerConfig{
 		PasswordCallback: func(c cryptoSSH.ConnMetadata, pass []byte) (*cryptoSSH.Permissions, error) {
-			if c.User() == "admin" && string(pass) == "password" {
-				return nil, nil
+			isAuthenticated, err := db.AuthenticateUser(c.User(), string(pass))
+			if err != nil {
+				log.Printf("Authentication error for user %s: %v", c.User(), err)
+				return nil, fmt.Errorf("authentication error")
 			}
-			return nil, fmt.Errorf("password rejected for %q", c.User())
+			if !isAuthenticated {
+				return nil, fmt.Errorf("invalid username or password")
+			}
+			return nil, nil
 		},
 	}
 
@@ -78,8 +92,8 @@ func main() {
 				return
 			}
 			log.Printf("Pod %s created for user %s", podName, username)
-
 			go cryptoSSH.DiscardRequests(reqs)
+
 			for newChannel := range chans {
 				if newChannel.ChannelType() != "session" {
 					newChannel.Reject(cryptoSSH.UnknownChannelType, "unsupported channel type")
