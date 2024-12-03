@@ -3,6 +3,7 @@ package k8s
 import (
 	"bytes"
 	"fmt"
+	"strings"
 
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/remotecommand"
@@ -42,12 +43,6 @@ func ExecuteCommandInPod(namespace, podName, containerName, command string) (str
 }
 
 func GetPodForUser(username string) (namespace, podName string, err error) {
-	switch username {
-	case "user1":
-		return "default", "pod-user1", nil
-	case "user2":
-		return "default", "pod-user2", nil
-	default:
-		return "", "", fmt.Errorf("No pod found for user %s", username)
-	}
+	podName = fmt.Sprintf("pod-%s", strings.ToLower(username))
+	return "default", podName, nil
 }

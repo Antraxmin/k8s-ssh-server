@@ -7,7 +7,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"strings"
 
 	"k8s-ssh-server/db"
 	"k8s-ssh-server/k8s"
@@ -20,24 +19,52 @@ func generateHostKey() (cryptoSSH.Signer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate private key: %w", err)
 	}
+	return cryptoSSH.NewSignerFromKey(privateKey)
+}
 
-	signer, err := cryptoSSH.NewSignerFromKey(privateKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create signer: %w", err)
+func handleChannel(channel cryptoSSH.Channel, requests <-chan *cryptoSSH.Request, username string) {
+	defer channel.Close()
+
+	for req := range requests {
+		switch req.Type {
+		case "shell":
+			req.Reply(true, nil)
+			channel.Write([]byte(fmt.Sprintf("Welcome to the SSH server, %s!\n", username)))
+
+			namespace, podName, err := k8s.GetPodForUser(username)
+			if err != nil {
+				log.Printf("Failed to get pod for user %s: %v", username, err)
+				return
+			}
+
+			channel.Write([]byte(fmt.Sprintf("Connected to pod %s in namespace %s\n", podName, namespace)))
+		case "exec":
+			req.Reply(true, nil)
+
+			namespace, podName, err := k8s.GetPodForUser(username)
+			if err != nil {
+				log.Printf("Failed to get pod: %v", err)
+				continue
+			}
+
+			cmd := string(req.Payload[4:])
+			output, err := k8s.ExecuteCommandInPod(namespace, podName, "", cmd)
+			if err != nil {
+				channel.Write([]byte(fmt.Sprintf("Error: %v\n", err)))
+				continue
+			}
+			channel.Write([]byte(output))
+		default:
+			req.Reply(false, nil)
+		}
 	}
-
-	return signer, nil
 }
 
 func main() {
 	db.InitDB()
 	defer db.DB.Close()
 
-	kubeConfigPath := os.Getenv("KUBECONFIG_PATH")
-	if kubeConfigPath == "" {
-		kubeConfigPath = "/root/.kube/config"
-	}
-	k8s.InitK8sClient(kubeConfigPath)
+	k8s.InitK8sClient(os.Getenv("KUBECONFIG"))
 
 	config := &cryptoSSH.ServerConfig{
 		PasswordCallback: func(c cryptoSSH.ConnMetadata, pass []byte) (*cryptoSSH.Permissions, error) {
@@ -49,7 +76,7 @@ func main() {
 			if !isAuthenticated {
 				return nil, fmt.Errorf("invalid username or password")
 			}
-			return nil, nil
+			return &cryptoSSH.Permissions{}, nil
 		},
 	}
 
@@ -59,14 +86,13 @@ func main() {
 	}
 	config.AddHostKey(hostKey)
 
-	address := "0.0.0.0:2222"
-	listener, err := net.Listen("tcp", address)
+	listener, err := net.Listen("tcp", "0.0.0.0:2222")
 	if err != nil {
-		log.Fatalf("Failed to start SSH server: %v", err)
+		log.Fatalf("Failed to start server: %v", err)
 	}
 	defer listener.Close()
 
-	log.Printf("SSH server listening on %s", address)
+	log.Printf("SSH server listening on 0.0.0.0:2222")
 
 	for {
 		conn, err := listener.Accept()
@@ -77,37 +103,38 @@ func main() {
 
 		go func(conn net.Conn) {
 			defer conn.Close()
+
 			sshConn, chans, reqs, err := cryptoSSH.NewServerConn(conn, config)
 			if err != nil {
 				log.Printf("Failed to handshake: %v", err)
 				return
 			}
 
-			username := sshConn.User()
-			log.Printf("New SSH connection from %s - user: %s", sshConn.RemoteAddr(), username)
+			log.Printf("New SSH connection from %s - user: %s", sshConn.RemoteAddr(), sshConn.User())
 
-			podName, err := k8s.CreateUserPod(strings.ToLower(username))
-			if err != nil {
-				log.Printf("Failed to create pod for user %s: %v", username, err)
-				return
-			}
-			log.Printf("Pod %s created for user %s", podName, username)
-			go cryptoSSH.DiscardRequests(reqs)
+			go func(reqs <-chan *cryptoSSH.Request) {
+				for req := range reqs {
+					if req.Type == "shell" {
+						req.Reply(true, nil)
+					} else {
+						req.Reply(false, nil)
+					}
+				}
+			}(reqs)
 
 			for newChannel := range chans {
 				if newChannel.ChannelType() != "session" {
 					newChannel.Reject(cryptoSSH.UnknownChannelType, "unsupported channel type")
 					continue
 				}
-				channel, _, err := newChannel.Accept()
+
+				channel, requests, err := newChannel.Accept()
 				if err != nil {
 					log.Printf("Failed to accept channel: %v", err)
 					continue
 				}
 
-				channel.Write([]byte(fmt.Sprintf("Welcome to the SSH server, %s!\n", username)))
-				channel.Write([]byte(fmt.Sprintf("Your Kubernetes pod '%s' is ready.\n", podName)))
-				channel.Close()
+				go handleChannel(channel, requests, sshConn.User())
 			}
 		}(conn)
 	}
