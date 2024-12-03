@@ -3,12 +3,10 @@ kind: Service
 metadata:
   name: k8s-ssh-server
 spec:
+  type: LoadBalancer
+  ports:
+  - port: 2222
+    targetPort: 2222
+    protocol: TCP
   selector:
     app: k8s-ssh-server
-  ports:
-  - protocol: TCP
-    port: 2222
-    targetPort: 2222
-  type: NodePort
-
-
