@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"fmt"
@@ -14,12 +15,20 @@ import (
 	cryptoSSH "golang.org/x/crypto/ssh"
 )
 
-func generateHostKey() (cryptoSSH.Signer, error) {
-	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate private key: %w", err)
+var hostKey crypto.Signer
+
+func getOrCreateHostKey() (cryptoSSH.Signer, error) {
+	if hostKey != nil {
+		return cryptoSSH.NewSignerFromKey(hostKey)
 	}
-	return cryptoSSH.NewSignerFromKey(privateKey)
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, err
+	}
+
+	hostKey = key
+	return cryptoSSH.NewSignerFromKey(key)
 }
 
 func handleChannel(channel cryptoSSH.Channel, requests <-chan *cryptoSSH.Request, username string) {
@@ -80,7 +89,7 @@ func main() {
 		},
 	}
 
-	hostKey, err := generateHostKey()
+	hostKey, err := getOrCreateHostKey()
 	if err != nil {
 		log.Fatalf("Failed to generate host key: %v", err)
 	}
