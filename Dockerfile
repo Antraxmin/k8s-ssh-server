@@ -1,4 +1,3 @@
-# Build 단계
 FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
@@ -7,12 +6,10 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o main .
 
-# Runtime 단계
 FROM amazonlinux:2
 
 WORKDIR /app
 
-# AWS CLI, kubectl, token-patch 설치
 RUN yum install -y unzip curl amazon-efs-utils python3 && \
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
     unzip awscliv2.zip && \

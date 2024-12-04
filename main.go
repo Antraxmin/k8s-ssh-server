@@ -63,12 +63,12 @@ func handleShell(channel cryptoSSH.Channel, requests <-chan *cryptoSSH.Request, 
 
 				channel.Write([]byte(fmt.Sprintf("Connected to pod %s in namespace %s\n", podName, namespace)))
 
-				io.Copy(channel, channel)
+				go io.Copy(channel, channel.Stderr())
+				io.Copy(channel.Stderr(), channel)
 			case "window-change":
 				req.Reply(true, nil)
 			default:
-				log.Printf("Received request type %s", req.Type)
-				req.Reply(false, nil)
+				req.Reply(true, nil)
 			}
 		}
 	}()
