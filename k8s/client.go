@@ -4,17 +4,23 @@ import (
 	"log"
 
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 var Clientset *kubernetes.Clientset
 
 func InitK8sClient(kubeconfigPath string) {
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+	var err error
+	Config, err = rest.InClusterConfig()
 	if err != nil {
-		log.Fatalf("Failed to load kubeconfig: %s", err)
+		Config, err = clientcmd.BuildConfigFromFlags("", kubeconfigPath)
+		if err != nil {
+			log.Fatalf("Failed to create config: %v", err)
+		}
 	}
-	Clientset, err = kubernetes.NewForConfig(config)
+
+	Clientset, err = kubernetes.NewForConfig(Config)
 	if err != nil {
 		log.Fatalf("Failed to create Kubernetes client: %s", err)
 	}
