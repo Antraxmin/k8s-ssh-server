@@ -18,17 +18,25 @@ import (
 var hostKey crypto.Signer
 
 func getOrCreateHostKey() (cryptoSSH.Signer, error) {
-	if hostKey != nil {
-		return cryptoSSH.NewSignerFromKey(hostKey)
+	keyBytes, err := k8s.GetHostKey()
+	if err == nil {
+		signer, err := cryptoSSH.ParsePrivateKey(keyBytes)
+		if err == nil {
+			return signer, nil
+		}
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, err
 	}
 
-	hostKey = key
-	return cryptoSSH.NewSignerFromKey(key)
+	err = k8s.SaveHostKey(privateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save host key: %v", err)
+	}
+
+	return cryptoSSH.NewSignerFromKey(privateKey)
 }
 
 func handleChannel(channel cryptoSSH.Channel, requests <-chan *cryptoSSH.Request, username string) {
@@ -91,7 +99,7 @@ func main() {
 
 	hostKey, err := getOrCreateHostKey()
 	if err != nil {
-		log.Fatalf("Failed to generate host key: %v", err)
+		log.Fatalf("Failed to get/create host key: %v", err)
 	}
 	config.AddHostKey(hostKey)
 
