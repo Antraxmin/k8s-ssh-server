@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
+	"sync"
 
 	"k8s-ssh-server/db"
 	"k8s-ssh-server/k8s"
@@ -39,41 +41,98 @@ func getOrCreateHostKey() (cryptoSSH.Signer, error) {
 	return cryptoSSH.NewSignerFromKey(privateKey)
 }
 
-func handleChannel(channel cryptoSSH.Channel, requests <-chan *cryptoSSH.Request, username string) {
-	defer channel.Close()
+func handleShell(channel cryptoSSH.Channel, requests <-chan *cryptoSSH.Request, username string) {
+	var wg sync.WaitGroup
+	wg.Add(1)
 
-	for req := range requests {
-		switch req.Type {
-		case "shell":
-			req.Reply(true, nil)
-			channel.Write([]byte(fmt.Sprintf("Welcome to the SSH server, %s!\n", username)))
+	go func() {
+		defer wg.Done()
+		for req := range requests {
+			switch req.Type {
+			case "pty-req":
+				req.Reply(true, nil)
+			case "shell":
+				req.Reply(true, nil)
+				channel.Write([]byte(fmt.Sprintf("Welcome to the SSH server, %s!\n", username)))
 
-			namespace, podName, err := k8s.GetPodForUser(username)
-			if err != nil {
-				log.Printf("Failed to get pod for user %s: %v", username, err)
+				namespace, podName, err := k8s.GetPodForUser(username)
+				if err != nil {
+					log.Printf("Failed to get pod for user %s: %v", username, err)
+					return
+				}
+
+				channel.Write([]byte(fmt.Sprintf("Connected to pod %s in namespace %s\n", podName, namespace)))
+
+				io.Copy(channel, channel)
+			case "window-change":
+				req.Reply(true, nil)
+			default:
+				log.Printf("Received request type %s", req.Type)
+				req.Reply(false, nil)
+			}
+		}
+	}()
+
+	wg.Wait()
+}
+
+func handleExec(channel cryptoSSH.Channel, req *cryptoSSH.Request, username string) {
+	cmd := string(req.Payload[4:])
+	namespace, podName, err := k8s.GetPodForUser(username)
+	if err != nil {
+		log.Printf("Failed to get pod: %v", err)
+		channel.Write([]byte(fmt.Sprintf("Error: %v\n", err)))
+		return
+	}
+
+	output, err := k8s.ExecuteCommandInPod(namespace, podName, "", cmd)
+	if err != nil {
+		channel.Write([]byte(fmt.Sprintf("Error: %v\n", err)))
+		return
+	}
+	channel.Write([]byte(output))
+}
+
+func handleConnection(conn net.Conn, config *cryptoSSH.ServerConfig) {
+	defer conn.Close()
+
+	sshConn, chans, reqs, err := cryptoSSH.NewServerConn(conn, config)
+	if err != nil {
+		log.Printf("Failed to handshake: %v", err)
+		return
+	}
+
+	log.Printf("New SSH connection from %s - user: %s", sshConn.RemoteAddr(), sshConn.User())
+
+	go cryptoSSH.DiscardRequests(reqs)
+
+	for newChannel := range chans {
+		if newChannel.ChannelType() != "session" {
+			newChannel.Reject(cryptoSSH.UnknownChannelType, "unsupported channel type")
+			continue
+		}
+
+		channel, requests, err := newChannel.Accept()
+		if err != nil {
+			log.Printf("Failed to accept channel: %v", err)
+			continue
+		}
+
+		go func(channel cryptoSSH.Channel, requests <-chan *cryptoSSH.Request) {
+			defer channel.Close()
+
+			req := <-requests
+			if req == nil {
 				return
 			}
 
-			channel.Write([]byte(fmt.Sprintf("Connected to pod %s in namespace %s\n", podName, namespace)))
-		case "exec":
-			req.Reply(true, nil)
-
-			namespace, podName, err := k8s.GetPodForUser(username)
-			if err != nil {
-				log.Printf("Failed to get pod: %v", err)
-				continue
+			switch req.Type {
+			case "exec":
+				handleExec(channel, req, sshConn.User())
+			default:
+				handleShell(channel, requests, sshConn.User())
 			}
-
-			cmd := string(req.Payload[4:])
-			output, err := k8s.ExecuteCommandInPod(namespace, podName, "", cmd)
-			if err != nil {
-				channel.Write([]byte(fmt.Sprintf("Error: %v\n", err)))
-				continue
-			}
-			channel.Write([]byte(output))
-		default:
-			req.Reply(false, nil)
-		}
+		}(channel, requests)
 	}
 }
 
@@ -118,41 +177,6 @@ func main() {
 			continue
 		}
 
-		go func(conn net.Conn) {
-			defer conn.Close()
-
-			sshConn, chans, reqs, err := cryptoSSH.NewServerConn(conn, config)
-			if err != nil {
-				log.Printf("Failed to handshake: %v", err)
-				return
-			}
-
-			log.Printf("New SSH connection from %s - user: %s", sshConn.RemoteAddr(), sshConn.User())
-
-			go func(reqs <-chan *cryptoSSH.Request) {
-				for req := range reqs {
-					if req.Type == "shell" {
-						req.Reply(true, nil)
-					} else {
-						req.Reply(false, nil)
-					}
-				}
-			}(reqs)
-
-			for newChannel := range chans {
-				if newChannel.ChannelType() != "session" {
-					newChannel.Reject(cryptoSSH.UnknownChannelType, "unsupported channel type")
-					continue
-				}
-
-				channel, requests, err := newChannel.Accept()
-				if err != nil {
-					log.Printf("Failed to accept channel: %v", err)
-					continue
-				}
-
-				go handleChannel(channel, requests, sshConn.User())
-			}
-		}(conn)
+		go handleConnection(conn, config)
 	}
 }
