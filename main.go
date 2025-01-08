@@ -13,6 +13,7 @@ import (
 
 	"k8s-ssh-server/db"
 	"k8s-ssh-server/k8s"
+	"k8s-ssh-server/ssh"
 
 	cryptoSSH "golang.org/x/crypto/ssh"
 )
@@ -161,22 +162,5 @@ func main() {
 		log.Fatalf("Failed to get/create host key: %v", err)
 	}
 	config.AddHostKey(hostKey)
-
-	listener, err := net.Listen("tcp", "0.0.0.0:2222")
-	if err != nil {
-		log.Fatalf("Failed to start server: %v", err)
-	}
-	defer listener.Close()
-
-	log.Printf("SSH server listening on 0.0.0.0:2222")
-
-	for {
-		conn, err := listener.Accept()
-		if err != nil {
-			log.Printf("Failed to accept connection: %v", err)
-			continue
-		}
-
-		go handleConnection(conn, config)
-	}
+	ssh.StartSSHServer(config, "0.0.0.0:2222")
 }
